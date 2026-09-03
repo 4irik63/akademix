@@ -24,10 +24,11 @@ from config import ADMIN_CHAT_IDS
 router = Router()
 
 
-# ---------- Старт ----------
+# ---------- Старт и Сброс (/stop) ----------
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext) -> None:
+@router.message(Command("stop"))
+async def cmd_start_or_stop(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         "Салют! Это AkademiX Study ⚡️\n\n"
@@ -343,7 +344,7 @@ async def ask_cancel_reason(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(
         order_id=order_id,
         order_msg_id=callback.message.message_id,
-        chat_id=callback.message.chat.id
+        chat_id=callback.message.chat.id,
     )
 
     await callback.message.answer(
@@ -387,7 +388,7 @@ async def process_cancellation(
     reason: str | None,
     admin_message: Message,
     data: dict,
-    bot: Bot
+    bot: Bot,
 ) -> None:
     order = await db.get_order(order_id)
     if not order:
@@ -396,7 +397,6 @@ async def process_cancellation(
 
     await db.update_order_status(order_id, "cancelled")
 
-    # Сообщение для клиента
     if reason:
         client_text = (
             f"❌ Ваш заказ №{order_id} был отменён администратором.\n\n"
@@ -414,7 +414,6 @@ async def process_cancellation(
     except Exception:
         pass
 
-    # Обновляем карточку заказа у админа (если есть id исходного сообщения)
     status_label = STATUS_LABELS.get("cancelled", "cancelled")
     updated_card_text = (
         f"№{order_id} — {status_label}\n\n"
@@ -494,6 +493,9 @@ async def end_chat_button(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(ChatStates.chatting, F.text)
 async def relay_chat_message(message: Message, state: FSMContext, bot: Bot) -> None:
+    if message.text.startswith("/"):
+        return
+
     data = await state.get_data()
     partner_id = data.get("partner_id")
     order_id = data.get("order_id")
