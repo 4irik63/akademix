@@ -22,8 +22,7 @@ MENU_MY_ORDERS = "📋 Мои заказы"
 
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Постоянная клавиатура внизу экрана — не пропадает после ответа бота,
-    поэтому пользователю не нужно каждый раз вводить /start."""
+    """Постоянная клавиатура внизу экрана."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=MENU_NEW_ORDER)],
@@ -57,8 +56,6 @@ def skip_details_keyboard() -> InlineKeyboardMarkup:
 
 
 def chat_keyboard(order_id: int) -> InlineKeyboardMarkup:
-    """Кнопка входа в чат по конкретному заказу — показывается и клиенту,
-    и назначенному администратору."""
     builder = InlineKeyboardBuilder()
     builder.button(text="💬 Чат по заказу", callback_data=f"start_chat:{order_id}")
     return builder.as_markup()
@@ -92,7 +89,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
 
 
 def order_action_keyboard(order_id: int, status: str) -> InlineKeyboardMarkup:
-    """Кнопки действий по конкретному заказу — набор зависит от текущего статуса."""
+    """Кнопки действий по конкретному заказу."""
     builder = InlineKeyboardBuilder()
 
     if status == "new":
@@ -100,8 +97,17 @@ def order_action_keyboard(order_id: int, status: str) -> InlineKeyboardMarkup:
     if status in ("new", "in_progress"):
         builder.button(text="✅ Готово", callback_data=f"set_status:{order_id}:done")
     if status in ("new", "in_progress"):
-        builder.button(text="❌ Отменить", callback_data=f"set_status:{order_id}:cancelled")
+        builder.button(text="❌ Отменить", callback_data=f"cancel_order_reason:{order_id}")
 
     builder.button(text="💬 Чат с клиентом", callback_data=f"start_chat:{order_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def cancel_reason_keyboard(order_id: int) -> InlineKeyboardMarkup:
+    """Кнопки при запросе причины отмены заказа."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⏩ Без указания причины", callback_data=f"skip_cancel_reason:{order_id}")
+    builder.button(text="🔙 Не отменять заказ", callback_data=f"abort_cancellation:{order_id}")
     builder.adjust(1)
     return builder.as_markup()

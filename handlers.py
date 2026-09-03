@@ -4,7 +4,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 
 import database as db
-from states import OrderStates, ChatStates
+from states import OrderStates, ChatStates, AdminStates
 from keyboards import (
     main_menu_keyboard,
     MENU_NEW_ORDER,
@@ -16,6 +16,7 @@ from keyboards import (
     end_chat_keyboard,
     admin_panel_keyboard,
     order_action_keyboard,
+    cancel_reason_keyboard,
     STATUS_LABELS,
 )
 from config import ADMIN_CHAT_IDS
@@ -110,15 +111,13 @@ async def show_summary(message: Message, state: FSMContext, edit: bool = False) 
         await message.answer(text, reply_markup=confirm_keyboard(), parse_mode="HTML")
 
 
-# ---------- Подтверждение / отмена ----------
+# ---------- Подтверждение / отмена клиентом ----------
 
 @router.callback_query(OrderStates.confirming, F.data == "confirm_order")
 async def confirm_order(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     data = await state.get_data()
     user = callback.from_user
 
-    # Равномерное распределение заказов между админами по кругу:
-    # 1-й заказ -> админ[0], 2-й -> админ[1], 3-й -> снова админ[0], и т.д.
     assigned_admin_id = None
     if ADMIN_CHAT_IDS:
         count_so_far = await db.get_order_count()
@@ -141,13 +140,11 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
         "Посмотреть свои заказы можно кнопкой «Мои заказы» в меню внизу."
     )
 
-    # Если исполнитель уже назначен — сразу даём кнопку чата с ним
     if assigned_admin_id:
         await callback.message.edit_text(confirm_text, reply_markup=chat_keyboard(order_id))
     else:
         await callback.message.edit_text(confirm_text)
 
-    # Уведомление назначенному администратору
     if assigned_admin_id:
         admin_text = (
             f"🆕 Новый заказ №{order_id} (назначен вам)\n\n"
@@ -160,7 +157,6 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
         try:
             await bot.send_message(assigned_admin_id, admin_text, reply_markup=chat_keyboard(order_id))
         except Exception:
-            # Например, админ ещё не писал боту /start, и бот не может ему написать первым.
             pass
 
     await state.clear()
@@ -209,7 +205,7 @@ async def my_orders(message: Message) -> None:
 @router.message(Command("myorders"))
 async def admin_my_orders(message: Message) -> None:
     if message.from_user.id not in ADMIN_CHAT_IDS:
-        return  # не админ — молча игнорируем, чтобы не палить список админов
+        return
 
     orders = await db.get_admin_orders(message.from_user.id)
 
@@ -240,7 +236,7 @@ async def admin_my_orders(message: Message) -> None:
 @router.message(Command("admin"))
 async def admin_panel(message: Message) -> None:
     if message.from_user.id not in ADMIN_CHAT_IDS:
-        return  # не админ — молча игнорируем
+        return
 
     await message.answer(
         "🛠 Админ-панель\n\nВыберите, какие заказы показать:",
@@ -257,7 +253,7 @@ async def admin_filter(callback: CallbackQuery) -> None:
     status_filter = callback.data.split(":", 1)[1]
 
     if status_filter == "all":
-        orders = await db.get_active_orders()  # без отменённых — те отдельно в архиве
+        orders = await db.get_active_orders()
     else:
         orders = await db.get_orders_by_status(status_filter)
 
@@ -315,11 +311,9 @@ async def set_order_status(callback: CallbackQuery, bot: Bot) -> None:
         reply_markup=order_action_keyboard(order_id, new_status),
     )
 
-    # Уведомляем клиента об изменении статуса
     client_status_texts = {
         "in_progress": f"⏳ Ваш заказ №{order_id} взят в работу!",
         "done": f"✅ Ваш заказ №{order_id} выполнен! Спасибо, что выбрали нас.",
-        "cancelled": f"❌ Ваш заказ №{order_id} отменён. Если это ошибка — напишите нам.",
     }
     client_text = client_status_texts.get(new_status)
     if client_text:
@@ -329,6 +323,121 @@ async def set_order_status(callback: CallbackQuery, bot: Bot) -> None:
             pass
 
     await callback.answer("Статус обновлён")
+
+
+# ---------- Логика отмены заказа админом с причиной ----------
+
+@router.callback_query(F.data.startswith("cancel_order_reason:"))
+async def ask_cancel_reason(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.from_user.id not in ADMIN_CHAT_IDS:
+        await callback.answer("Недоступно.", show_alert=True)
+        return
+
+    order_id = int(callback.data.split(":", 1)[1])
+    order = await db.get_order(order_id)
+    if not order:
+        await callback.answer("Заказ не найден.", show_alert=True)
+        return
+
+    await state.set_state(AdminStates.waiting_for_cancel_reason)
+    await state.update_data(
+        order_id=order_id,
+        order_msg_id=callback.message.message_id,
+        chat_id=callback.message.chat.id
+    )
+
+    await callback.message.answer(
+        f"Напишите причину отмены заказа <b>№{order_id}</b> (сообщение с причиной будет отправлено клиенту):",
+        reply_markup=cancel_reason_keyboard(order_id),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(AdminStates.waiting_for_cancel_reason, F.data.startswith("abort_cancellation:"))
+async def abort_cancellation(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.message.edit_text("Отмена заказа прервана. Статус остался прежним.")
+    await callback.answer()
+
+
+@router.callback_query(AdminStates.waiting_for_cancel_reason, F.data.startswith("skip_cancel_reason:"))
+async def skip_cancel_reason(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    order_id = int(callback.data.split(":", 1)[1])
+    data = await state.get_data()
+    await state.clear()
+    await process_cancellation(order_id=order_id, reason=None, admin_message=callback.message, data=data, bot=bot)
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_for_cancel_reason, F.text)
+async def enter_cancel_reason_text(message: Message, state: FSMContext, bot: Bot) -> None:
+    if message.from_user.id not in ADMIN_CHAT_IDS:
+        return
+
+    data = await state.get_data()
+    order_id = data.get("order_id")
+    await state.clear()
+
+    await process_cancellation(order_id=order_id, reason=message.text, admin_message=message, data=data, bot=bot)
+
+
+async def process_cancellation(
+    order_id: int,
+    reason: str | None,
+    admin_message: Message,
+    data: dict,
+    bot: Bot
+) -> None:
+    order = await db.get_order(order_id)
+    if not order:
+        await admin_message.answer("Заказ не найден.")
+        return
+
+    await db.update_order_status(order_id, "cancelled")
+
+    # Сообщение для клиента
+    if reason:
+        client_text = (
+            f"❌ Ваш заказ №{order_id} был отменён администратором.\n\n"
+            f"<b>Причина:</b> {reason}\n\n"
+            "Если у вас остались вопросы — напишите нам."
+        )
+    else:
+        client_text = (
+            f"❌ Ваш заказ №{order_id} был отменён.\n\n"
+            "Если это ошибка или возникли вопросы — напишите нам."
+        )
+
+    try:
+        await bot.send_message(order["user_id"], client_text, parse_mode="HTML")
+    except Exception:
+        pass
+
+    # Обновляем карточку заказа у админа (если есть id исходного сообщения)
+    status_label = STATUS_LABELS.get("cancelled", "cancelled")
+    updated_card_text = (
+        f"№{order_id} — {status_label}\n\n"
+        f"📚 {order['work_type']} по «{order['subject']}»\n"
+        f"👤 Клиент: {order['full_name']} (@{order['username'] or '—'})"
+    )
+    if reason:
+        updated_card_text += f"\n❌ Причина отмены: {reason}"
+
+    orig_msg_id = data.get("order_msg_id")
+    chat_id = data.get("chat_id")
+    if orig_msg_id and chat_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=orig_msg_id,
+                text=updated_card_text,
+                reply_markup=order_action_keyboard(order_id, "cancelled"),
+            )
+        except Exception:
+            pass
+
+    await admin_message.answer(f"✅ Заказ №{order_id} успешно отменён. Клиенту отправлено уведомление.")
 
 
 # ---------- Чат клиент <-> исполнитель ----------
@@ -345,11 +454,9 @@ async def start_chat(callback: CallbackQuery, state: FSMContext) -> None:
     user_id = callback.from_user.id
 
     if user_id == order["user_id"]:
-        # Пишет клиент — партнёр это назначенный админ
         partner_id = order["assigned_admin_id"]
         partner_label = "исполнителем"
     elif user_id == order["assigned_admin_id"]:
-        # Пишет исполнитель — партнёр это клиент
         partner_id = order["user_id"]
         partner_label = "клиентом"
     else:

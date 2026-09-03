@@ -13,3 +13,8 @@ class OrderStates(StatesGroup):
 class ChatStates(StatesGroup):
     """Состояние переписки с исполнителем/клиентом по заказу."""
     chatting = State()
+
+
+class AdminStates(StatesGroup):
+    """Состояния для админ-действий."""
+    waiting_for_cancel_reason = State()
